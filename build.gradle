@@ -1,0 +1,127 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.14'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.AutoTrading'
+version = '0.0.1-SNAPSHOT'
+description = 'autotrading-market-data'
+
+ext {
+    resilience4jVersion = '2.4.0'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+configurations.configureEach {
+    // Spring Boot 기본 로깅(Logback)을 제외하고 Log4j2로 로깅 구현체를 통일한다.
+    exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
+}
+
+dependencies {
+    // Spring WebFlux: non-blocking REST API와 WebClient 기반 외부 API 호출에 사용한다.
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+    // Jakarta WebSocket API: WebFlux 환경에서 Binance WebSocket stream 연결을 준비한다.
+    implementation 'jakarta.websocket:jakarta.websocket-api'
+
+    // Log4j2: Spring Boot 기본 Logback 대신 사용할 로깅 구현체다.
+    implementation 'org.springframework.boot:spring-boot-starter-log4j2'
+
+    // Validation: request parameter, DTO, configuration properties 검증에 사용한다.
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+    // Actuator: health check, metrics, Prometheus endpoint 등 운영 관측 기능을 제공한다.
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // AOP: Resilience4j annotation 기반 circuit breaker/retry 적용에 필요하다.
+    implementation 'org.springframework.boot:spring-boot-starter-aop'
+
+    // Spring Cache abstraction: exchange info, symbol metadata 같은 반복 조회 데이터 캐싱에 사용한다.
+    implementation 'org.springframework.boot:spring-boot-starter-cache'
+
+    // Reactive Redis: WebFlux 환경에서 Redis Streams 기반 이벤트 발행과 핫상태 key-value 저장에 non-blocking으로 사용한다.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis-reactive'
+
+    // Spring Data R2DBC: WebFlux 흐름을 유지하면서 DB에 non-blocking 방식으로 적재한다.
+    implementation 'org.springframework.boot:spring-boot-starter-data-r2dbc'
+
+    // Flyway: DB schema migration을 코드와 함께 버전 관리한다.
+    implementation 'org.flywaydb:flyway-core'
+
+    // Resilience4j Spring Boot integration: retry, rate limiter, circuit breaker 설정을 Spring과 연동한다.
+    implementation "io.github.resilience4j:resilience4j-spring-boot3:${resilience4jVersion}"
+
+    // Resilience4j Reactor integration: Mono/Flux 체인에 resilience operator를 적용한다.
+    implementation "io.github.resilience4j:resilience4j-reactor:${resilience4jVersion}"
+
+    // Caffeine: 고성능 in-memory cache 구현체로 Spring Cache와 함께 사용한다.
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+
+    // Apache Commons Lang: StringUtils, ObjectUtils 등 일반 유틸리티를 제공한다.
+    implementation 'org.apache.commons:commons-lang3'
+
+    // Apache Commons Codec: Binance signed API 구현 시 HMAC, hex, base64 처리에 사용한다.
+    implementation 'commons-codec:commons-codec'
+
+    // Lombok: getter, builder, constructor 등 반복 코드를 컴파일 시점에 생성한다.
+    compileOnly 'org.projectlombok:lombok'
+
+    // DevTools: 로컬 개발 중 자동 재시작과 개발 편의 기능을 제공한다.
+    developmentOnly 'org.springframework.boot:spring-boot-devtools'
+
+    // Log4j2 JSON layout: 운영 환경에서 structured logging(JSON 로그)을 구성할 때 사용한다.
+    runtimeOnly 'org.apache.logging.log4j:log4j-layout-template-json'
+
+    // Prometheus registry: Actuator metrics를 Prometheus 형식으로 노출한다.
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+
+    // PostgreSQL R2DBC driver: reactive PostgreSQL 연결에 사용한다.
+    runtimeOnly 'org.postgresql:r2dbc-postgresql'
+
+    // PostgreSQL JDBC driver: Flyway migration처럼 JDBC 기반 도구에서 사용한다.
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // Flyway PostgreSQL support: Flyway 10+에서 PostgreSQL database support를 제공한다.
+    runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+
+    // Configuration processor: application.properties/yml의 custom properties 자동완성과 metadata를 생성한다.
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    // Lombok annotation processor: Lombok annotation을 컴파일 시점에 처리한다.
+    annotationProcessor 'org.projectlombok:lombok'
+
+    // Spring Boot test: JUnit, AssertJ, Mockito, Spring test utilities를 포함한다.
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+    // Reactor test: Mono/Flux 동작을 StepVerifier로 검증한다.
+    testImplementation 'io.projectreactor:reactor-test'
+
+    // Testcontainers PostgreSQL: 실제 PostgreSQL 컨테이너로 repository/integration test를 검증한다.
+    testImplementation 'org.testcontainers:postgresql'
+
+    // Testcontainers JUnit: JUnit 5 테스트에서 Testcontainers lifecycle을 관리한다.
+    testImplementation 'org.testcontainers:junit-jupiter'
+
+    // Test Lombok: 테스트 코드에서 Lombok annotation을 사용할 수 있게 한다.
+    testCompileOnly 'org.projectlombok:lombok'
+
+    // JUnit Platform launcher: Gradle에서 JUnit Platform 기반 테스트를 실행한다.
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // Test Lombok annotation processor: 테스트 컴파일 시 Lombok annotation을 처리한다.
+    testAnnotationProcessor 'org.projectlombok:lombok'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
