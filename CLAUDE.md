@@ -24,9 +24,18 @@ spring-jdbc(HikariCP) + Flyway, Redis(Lettuce), Log4j2, RestClient.
 인프라: Docker 컨테이너 `PostgreSQL01`(5432, DB/계정/스키마 = marketdata, 계정이 DB owner), `redis`(6379).
 health: `GET /actuator/health` — db·redis 컴포넌트 UP 확인.
 
-## 시크릿
-- `application.properties` — placeholder 템플릿 (gitignore 안 됨)
-- **`application-local.properties`** — 실제 값 (gitignored) ← 시크릿은 여기만
+## 설정 / 시크릿 (프로파일 분리, 2026-06-13 정리)
+원칙: **JAR = 환경 무관 공통 설정만. 접속정보/시크릿은 JAR 밖에서 환경별 주입, git 추적 안 함.**
+
+- `src/main/resources/application.properties` — **공통 설정만** (포트·가상스레드·collect.*·binance 타임아웃 등).
+  접속정보(datasource url/계정/비번)·flyway 스키마·redis host 는 **없음**. 기본 프로파일 `spring.profiles.active=local`.
+- **개발(local)**: 프로젝트 루트 `application-local.properties` (gitignored) — 실제 접속정보.
+  ※ `src/main/resources` 가 아니라 **루트**에 둔다 (resources 면 JAR 에 패키징되어 유출). IntelliJ 실행 시 작업 디렉토리(루트)에서 자동 로드.
+  템플릿: `application-local.properties.example` (커밋됨, 값 비움).
+- **운영(prod, WSL)**: `application-prod.properties` 파일 없음. systemd `EnvironmentFile=/etc/autotrading/market-data.env`
+  의 환경변수(`SPRING_DATASOURCE_*` 등, relaxed binding)로 주입. `SPRING_PROFILES_ACTIVE=prod` 로 기본 local override.
+  배포 템플릿: `deploy/autotrading-market-data.service`, `deploy/market-data.env.example`.
+- 바이낸스 시장데이터는 **공개 엔드포인트라 API 키 불필요** (api.key/secret 설정 없음).
 
 ## 패키지 구조 (`com.autotrading.autotradingmarketdata`)
 ```
@@ -88,9 +97,9 @@ docs/adr/  아키텍처 결정 기록
 binance.rest-base-url=https://fapi.binance.com   # 선물 fapi (현물 api.binance.com 아님!)
 binance.connect-timeout=5s / read-timeout=15s    # 폴링 주기보다 짧게
 collect.kline.enabled / symbols / intervals / backfill-days / page-limit / fixed-delay
-spring.datasource.* (?currentSchema=marketdata)  # 실제 값은 local
-spring.flyway.default-schema / schemas           # url 없음 — 메인 DataSource 공유
-spring.data.redis.host / port
+spring.datasource.* (?currentSchema=marketdata)  # 환경별 주입(개발=local 파일 / 운영=env var). application.properties 엔 없음
+spring.flyway.default-schema / schemas           # url 없음 — 메인 DataSource 공유. 환경별 주입
+spring.data.redis.host / port                    # 환경별 주입
 ```
 
 ## 다음 단계 / 미결

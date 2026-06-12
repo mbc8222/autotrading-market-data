@@ -36,4 +36,8 @@ out/
 ### VS Code ###
 .vscode/
 
-src/main/resources/application-local.properties
+### 시크릿 — 절대 커밋 금지 (.example 템플릿만 추적) ###
+application-local.properties
+application-prod.properties
+*.env
+!*.env.example

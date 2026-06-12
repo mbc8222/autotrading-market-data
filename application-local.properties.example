@@ -1,0 +1,23 @@
+# application-local.properties.example
+#
+# 개발(local) 프로파일 전용 접속정보 템플릿.
+# 이 파일을 복사해 application-local.properties 로 만들고 실제 값을 채운다.
+#   cp application-local.properties.example application-local.properties
+#
+# - 이 .example 만 git 추적 (실제 application-local.properties 는 .gitignore 로 제외).
+# - 프로젝트 루트에 두면 IntelliJ 실행(작업 디렉토리=루트) 시 자동 로드된다.
+#   src/main/resources 에 두지 말 것 — JAR 에 패키징되어 시크릿이 유출된다.
+# - 운영(WSL)은 이 파일을 쓰지 않는다. systemd EnvironmentFile 의 환경변수로 주입 (deploy/ 참고).
+
+# PostgreSQL (Docker 컨테이너 PostgreSQL01, DB/계정/스키마 = marketdata)
+spring.datasource.url=jdbc:postgresql://localhost:5432/marketdata?currentSchema=marketdata
+spring.datasource.username=your_username
+spring.datasource.password=your_password
+
+# Flyway — 위 DataSource 공유, 스키마만 지정
+spring.flyway.default-schema=marketdata
+spring.flyway.schemas=marketdata
+
+# Redis (Docker 컨테이너 redis)
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
