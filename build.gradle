@@ -1,16 +1,12 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.5.14'
+    id 'org.springframework.boot' version '4.1.0'
     id 'io.spring.dependency-management' version '1.1.7'
 }
 
 group = 'com.AutoTrading'
 version = '0.0.1-SNAPSHOT'
 description = 'autotrading-market-data'
-
-ext {
-    resilience4jVersion = '2.4.0'
-}
 
 java {
     toolchain {
@@ -27,12 +23,28 @@ configurations.configureEach {
     exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
 }
 
-dependencies {
-    // Spring WebFlux: non-blocking REST API와 WebClient 기반 외부 API 호출에 사용한다.
-    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+dependencyManagement {
+    imports {
+        // Boot 4.x는 testcontainers 버전을 관리하지 않으므로 BOM을 직접 import 해
+        // 버전 없는 testcontainers 의존성들에 버전을 공급한다.
+        mavenBom 'org.testcontainers:testcontainers-bom:2.0.5'
+    }
+}
 
-    // Jakarta WebSocket API: WebFlux 환경에서 Binance WebSocket stream 연결을 준비한다.
-    implementation 'jakarta.websocket:jakarta.websocket-api'
+dependencies {
+    // Spring Web(MVC): 명령형 스택 + Java 21 가상 스레드 조합. actuator 노출과 RestClient 기반 외부 API 호출에 사용한다.
+    // (WebFlux 대신 명령형 채택 — 이 서비스의 실동시성은 WS 몇 개 + 폴링 수준이라 reactive 이득이 없음. docs/adr/001 참고)
+    // Boot 4.0에서 spring-boot-starter-web → spring-boot-starter-webmvc 로 개명됨.
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+
+    // RestClient: Boot 4.0 모듈화로 http client 설정(ClientHttpRequestFactorySettings 등)이 분리됨.
+    implementation 'org.springframework.boot:spring-boot-starter-restclient'
+
+    // WebSocket: jakarta.websocket 클라이언트(Tomcat 구현)로 바이낸스 fstream 실시간 수신.
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+
+    // Spring JDBC: DataSource(HikariCP) 자동설정 + JdbcClient/JdbcTemplate. Flyway도 이 DataSource를 공유한다.
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
 
     // Log4j2: Spring Boot 기본 Logback 대신 사용할 로깅 구현체다.
     implementation 'org.springframework.boot:spring-boot-starter-log4j2'
@@ -43,26 +55,14 @@ dependencies {
     // Actuator: health check, metrics, Prometheus endpoint 등 운영 관측 기능을 제공한다.
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
-    // AOP: Resilience4j annotation 기반 circuit breaker/retry 적용에 필요하다.
-    implementation 'org.springframework.boot:spring-boot-starter-aop'
-
     // Spring Cache abstraction: exchange info, symbol metadata 같은 반복 조회 데이터 캐싱에 사용한다.
     implementation 'org.springframework.boot:spring-boot-starter-cache'
 
-    // Reactive Redis: WebFlux 환경에서 Redis Streams 기반 이벤트 발행과 핫상태 key-value 저장에 non-blocking으로 사용한다.
-    implementation 'org.springframework.boot:spring-boot-starter-data-redis-reactive'
+    // Redis(Lettuce, 명령형): 최신가 key-value 저장과 시장이벤트 Redis Streams 발행에 사용한다.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
 
-    // Spring Data R2DBC: WebFlux 흐름을 유지하면서 DB에 non-blocking 방식으로 적재한다.
-    implementation 'org.springframework.boot:spring-boot-starter-data-r2dbc'
-
-    // Flyway: DB schema migration을 코드와 함께 버전 관리한다.
-    implementation 'org.flywaydb:flyway-core'
-
-    // Resilience4j Spring Boot integration: retry, rate limiter, circuit breaker 설정을 Spring과 연동한다.
-    implementation "io.github.resilience4j:resilience4j-spring-boot3:${resilience4jVersion}"
-
-    // Resilience4j Reactor integration: Mono/Flux 체인에 resilience operator를 적용한다.
-    implementation "io.github.resilience4j:resilience4j-reactor:${resilience4jVersion}"
+    // Flyway: DB schema migration을 코드와 함께 버전 관리한다. (Boot 4.0부터 전용 starter 사용)
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
 
     // Caffeine: 고성능 in-memory cache 구현체로 Spring Cache와 함께 사용한다.
     implementation 'com.github.ben-manes.caffeine:caffeine'
@@ -85,10 +85,7 @@ dependencies {
     // Prometheus registry: Actuator metrics를 Prometheus 형식으로 노출한다.
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 
-    // PostgreSQL R2DBC driver: reactive PostgreSQL 연결에 사용한다.
-    runtimeOnly 'org.postgresql:r2dbc-postgresql'
-
-    // PostgreSQL JDBC driver: Flyway migration처럼 JDBC 기반 도구에서 사용한다.
+    // PostgreSQL JDBC driver: DataSource 연결과 Flyway migration에 사용한다.
     runtimeOnly 'org.postgresql:postgresql'
 
     // Flyway PostgreSQL support: Flyway 10+에서 PostgreSQL database support를 제공한다.
@@ -103,14 +100,12 @@ dependencies {
     // Spring Boot test: JUnit, AssertJ, Mockito, Spring test utilities를 포함한다.
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 
-    // Reactor test: Mono/Flux 동작을 StepVerifier로 검증한다.
-    testImplementation 'io.projectreactor:reactor-test'
-
     // Testcontainers PostgreSQL: 실제 PostgreSQL 컨테이너로 repository/integration test를 검증한다.
-    testImplementation 'org.testcontainers:postgresql'
+    // (testcontainers 2.0부터 아티팩트명에 testcontainers- 접두사가 붙음. 버전은 BOM이 공급)
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
 
     // Testcontainers JUnit: JUnit 5 테스트에서 Testcontainers lifecycle을 관리한다.
-    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
 
     // Test Lombok: 테스트 코드에서 Lombok annotation을 사용할 수 있게 한다.
     testCompileOnly 'org.projectlombok:lombok'
