@@ -17,12 +17,25 @@ spring-jdbc(HikariCP) + Flyway, Redis(Lettuce), Log4j2, RestClient.
 
 ## 빌드 / 실행
 ```bash
+# 개발(local) — IntelliJ 또는 CLI, 호스트에서 직접 실행
 ./gradlew.bat compileJava     # 컴파일
 ./gradlew.bat bootRun         # 실행 (PostgreSQL01·redis Docker 컨테이너 필요)
 ./gradlew.bat test            # 테스트
 ```
+```bash
+# 운영(prod) — Docker 컨테이너 (2026-06-13 채택, deploy 상세는 아래 "배포" 절)
+docker compose up -d --build  # 빌드(컨테이너 내 ./gradlew bootJar)+기동, 자동재시작
+docker compose logs -f        # 로그(파일 로그는 호스트 ./logs 에도 보존)
+```
 인프라: Docker 컨테이너 `PostgreSQL01`(5432, DB/계정/스키마 = marketdata, 계정이 DB owner), `redis`(6379).
 health: `GET /actuator/health` — db·redis 컴포넌트 UP 확인.
+
+## 배포 (Docker, 2026-06-13 — WSL+systemd 에서 전환)
+- **`Dockerfile`**(멀티스테이지): 빌드 스테이지에서 컨테이너 내 `./gradlew bootJar` → IntelliJ "Build Artifacts" 함정(thin jar/MANIFEST 중복) 원천 차단·재현성. 런타임=JRE 21, 비루트(appuser).
+- **`docker-compose.yml`**: `restart: unless-stopped`(★죽으면 자동재시작+데몬 기동 시 자동기동=무중단 핵심), `SPRING_PROFILES_ACTIVE=prod`, `env_file: deploy/market-data.env`(접속정보), `8080:8080` 발행, `./logs:/var/log/autotrading` 볼륨(파일 로그 보존).
+- **인프라(PostgreSQL01·redis)는 이 compose 밖 별도 컨테이너** — 건드리지 않음(재시작=수집 갭 회피). 컨테이너→DB/redis 는 `host.docker.internal:5432/6379`(호스트 발행 포트). `extra_hosts: host-gateway` 명시.
+- 모니터링(prometheus·grafana)도 별도 compose(`%USERPROFILE%\docker`). prometheus 는 `host.docker.internal:8080` 으로 스크랩(⚠️기존 prometheus.yml 타깃 포트 일치 확인 필요).
+- 절차: `cp deploy/market-data.env.example deploy/market-data.env` → 값 채움 → `docker compose up -d --build`.
 
 ## 설정 / 시크릿 (프로파일 분리, 2026-06-13 정리)
 원칙: **JAR = 환경 무관 공통 설정만. 접속정보/시크릿은 JAR 밖에서 환경별 주입, git 추적 안 함.**
@@ -32,9 +45,9 @@ health: `GET /actuator/health` — db·redis 컴포넌트 UP 확인.
 - **개발(local)**: 프로젝트 루트 `application-local.properties` (gitignored) — 실제 접속정보.
   ※ `src/main/resources` 가 아니라 **루트**에 둔다 (resources 면 JAR 에 패키징되어 유출). IntelliJ 실행 시 작업 디렉토리(루트)에서 자동 로드.
   템플릿: `application-local.properties.example` (커밋됨, 값 비움).
-- **운영(prod, WSL)**: `application-prod.properties` 파일 없음. systemd `EnvironmentFile=/etc/autotrading/market-data.env`
+- **운영(prod, Docker)**: `application-prod.properties` 파일 없음. compose `env_file: deploy/market-data.env`
   의 환경변수(`SPRING_DATASOURCE_*` 등, relaxed binding)로 주입. `SPRING_PROFILES_ACTIVE=prod` 로 기본 local override.
-  배포 템플릿: `deploy/autotrading-market-data.service`, `deploy/market-data.env.example`.
+  접속 host 는 `host.docker.internal`(컨테이너→호스트 발행 포트). 템플릿: `deploy/market-data.env.example`.
 - 바이낸스 시장데이터는 **공개 엔드포인트라 API 키 불필요** (api.key/secret 설정 없음).
 
 ## 패키지 구조 (`com.autotrading.autotradingmarketdata`)
@@ -65,7 +78,7 @@ docs/adr/  아키텍처 결정 기록
 | 마크/인덱스/예상펀딩 | WS @markPrice@1s (/market) | 실시간 | KV `market:mark-price:{s}` (hash) |
 | 호가 top20 요약 | WS @depth20@500ms (/public) | 실시간 | KV `market:orderbook:{s}` — raw 미적재(기존 결정) |
 | 강제 청산 | WS @forceOrder (/market) | 실시간, 2s flush+재큐잉 | `binance_liquidations` + Stream `market:liquidation` |
-| 원시 체결 | WS @aggTrade (/market) + REST 갭 보정 | 버퍼→배치 적재, 60s 갭 sweep | `agg_trade` (일별 파티션, 90일) — Stream 미발행(소비자 미정) |
+| 원시 체결 | WS @aggTrade (/market) + REST 갭 보정 | 버퍼→배치 적재, 60s 갭 sweep | `agg_trade` (일별 파티션, 90일) + **Stream `market:aggTrade`**(분석 CVD/매물대 소비자용, 고빈도→2k건마다 트림, `publish.aggtrade.enabled`) |
 
 > 418(IP ban)은 `BinanceBanGuard`로 모든 REST 수집기 10분 일괄 중지 (계속 두드리면 ban 연장).
 > aggTrade는 유효성 필터(agg_id·price·qty·T 양수) — 쓰레기 행의 watermark 오염 방지(모놀리스 사고 사례).
@@ -75,6 +88,7 @@ docs/adr/  아키텍처 결정 기록
   raw 5종(`raw_buffer_size/offered/dropped`, `raw_persister_written/lost`) — `RawMonitor`가 등록.
   속도(in/out rate)는 조회 측 `rate()`로 — 앱은 누적값만 노출.
 - **로그**: `RawMonitor`가 15s 구조화 한 줄(`[RAW-MON] agg[size hwm(pct) in/s out/s drop] lost`) + 점유 50%·drop/lost 증가 시 WARN/ERROR. 핵심 감시 대상 = "조용한 유실"(버퍼 점유 상승이 선행지표).
+- **로그 출력** (2026-06-13, `src/main/resources/log4j2-spring.xml`): Log4j2(logback 제외). 콘솔은 전 프로파일 공통 → 운영(Docker)에선 `docker compose logs`/로그 드라이버가 캡처. **prod 전용 롤링 파일**(`<SpringProfile name="prod">` arbiter): `/var/log/autotrading/market-data.log`, 일별+50MB 트리거·gz 압축·14일 경과분 자동삭제. Docker 에선 compose 볼륨 `./logs:/var/log/autotrading`로 호스트에 보존(컨테이너 재생성에도 유지). 개발(local)은 콘솔만(루트에 logs/ 안 생김).
 - 미결: Discord 경보(능동 알림), Prometheus/Grafana 컨테이너(docker-compose 단계), 서비스 간 trace ID 전파(주문 경로 생길 때).
 
 ## 작업 원칙 (모놀리스에서 이식·계승)
@@ -105,6 +119,6 @@ spring.data.redis.host / port                    # 환경별 주입
 ## 다음 단계 / 미결
 - **모놀리스 수집과 이중 가동 중** — 같은 데이터를 양쪽 DB(autotrading/marketdata)에 수집(특히 raw agg_trade 디스크 2배). 모놀리스 수집 중단 시점 결정 필요.
 - kline 백필 깊이 7일은 임시값 — ② 분석 서비스의 데이터 소스 결정(6년 재백필 vs 모놀리스 DB 이관)과 묶어서 확정.
-- aggTrade의 Stream 발행은 분석 서비스 소비자 정의 후 (현재 DB만).
+- ~~aggTrade의 Stream 발행은 분석 서비스 소비자 정의 후~~ → **완료(2026-06-13)**: analyzer FlowAnalyzer(CVD)·VolumeProfileAnalyzer 소비자 정의됨 → `MarketDataPublisher.publishAggTrade`로 `market:aggTrade` 발행(DB 적재 경로와 별개). ⚠️**운영 컨테이너 재배포 필요**(`docker compose up -d --build`)해야 발행 활성화.
 - 재시도/서킷브레이커: Spring Framework 7 내장 `@Retryable`/`@EnableResilientMethods` 적용 검토.
 - 주문 신호 모델 A/B는 보류 중.

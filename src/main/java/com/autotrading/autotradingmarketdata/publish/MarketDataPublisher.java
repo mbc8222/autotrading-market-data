@@ -22,13 +22,19 @@ public class MarketDataPublisher {
 
     public static final String KLINE_STREAM_KEY = "market:kline";
     public static final String LIQUIDATION_STREAM_KEY = "market:liquidation";
+    public static final String AGG_TRADE_STREAM_KEY = "market:aggTrade";
     private static final String LAST_PRICE_KEY_PREFIX = "market:last-price:";
     private static final String MARK_PRICE_KEY_PREFIX = "market:mark-price:";
     private static final String ORDER_BOOK_KEY_PREFIX = "market:orderbook:";
     private static final long KLINE_STREAM_MAX_LENGTH = 100_000;
     private static final long LIQUIDATION_STREAM_MAX_LENGTH = 50_000;
+    // aggTrade는 고빈도(초당 수백~수천) — CVD 롤링 윈도우 + 여유분만 보존. 소비자(분석 CVD)는 멱등키(aggId)로 중복 무시.
+    private static final long AGG_TRADE_STREAM_MAX_LENGTH = 500_000;
+    private static final long AGG_TRADE_TRIM_EVERY = 2_000;
 
     private final StringRedisTemplate redis;
+    // 고빈도 경로 — 매 XADD마다 trim하면 round-trip이 2배라, N건마다 한 번만 approximate trim.
+    private final java.util.concurrent.atomic.AtomicLong aggTradeAddCount = new java.util.concurrent.atomic.AtomicLong();
 
     public MarketDataPublisher(StringRedisTemplate redis) {
         this.redis = redis;
@@ -52,6 +58,25 @@ public class MarketDataPublisher {
         }
         if (!closedKlines.isEmpty()) {
             redis.opsForStream().trim(KLINE_STREAM_KEY, KLINE_STREAM_MAX_LENGTH, true);
+        }
+    }
+
+    /**
+     * 원시 체결 1건을 Stream에 발행 — 분석 서비스의 실시간 CVD/매물대 누적용.
+     * 자연키(aggId)를 멱등키로 소비자가 중복을 무시한다. 고빈도라 trim은 {@value #AGG_TRADE_TRIM_EVERY}건마다.
+     */
+    public void publishAggTrade(String symbol, long aggId, double price, double qty,
+                                boolean buyerMaker, long tradeTime) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        fields.put("symbol", symbol);
+        fields.put("aggId", String.valueOf(aggId));
+        fields.put("price", String.valueOf(price));
+        fields.put("qty", String.valueOf(qty));
+        fields.put("isBuyerMaker", buyerMaker ? "1" : "0");
+        fields.put("tradeTime", String.valueOf(tradeTime));
+        redis.opsForStream().add(AGG_TRADE_STREAM_KEY, fields);
+        if (aggTradeAddCount.incrementAndGet() % AGG_TRADE_TRIM_EVERY == 0) {
+            redis.opsForStream().trim(AGG_TRADE_STREAM_KEY, AGG_TRADE_STREAM_MAX_LENGTH, true);
         }
     }
 

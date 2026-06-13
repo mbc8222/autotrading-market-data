@@ -1,0 +1,37 @@
+# autotrading-market-data — 컨테이너 실행 (2026-06-13: WSL+systemd 대신 Docker 채택)
+#
+# 실행:   docker compose up -d --build      (이 파일 위치 = 프로젝트 루트)
+# 로그:   docker compose logs -f             (+ 파일 로그는 호스트 ./logs 에 보존)
+# 갱신:   docker compose up -d --build       (코드/접속정보 바꾼 뒤)
+# 중지:   docker compose down
+#
+# 인프라(PostgreSQL01·redis)는 이 compose 밖의 별도 컨테이너다(건드리지 않음 = 수집 무중단).
+# 호스트로 포트를 발행하므로 컨테이너에서는 host.docker.internal:<port> 로 접속한다.
+# 모니터링(prometheus·grafana)도 별도 compose(%USERPROFILE%\docker) — prometheus 는
+# host.docker.internal:8080 으로 actuator/prometheus 를 스크랩(아래 ports 발행).
+services:
+  market-data:
+    build: .
+    image: autotrading-market-data:latest
+    container_name: autotrading-market-data
+
+    # ★ 무중단 핵심: 죽으면 자동 재시작 + Docker 데몬 기동(부팅) 시 자동 기동 — 25h 손실 재발 방지.
+    restart: unless-stopped
+
+    # prod 프로파일 활성화 → 접속정보=env_file, 로그=파일 appender (log4j2-spring.xml).
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+    # 접속정보/시크릿. deploy/market-data.env.example 를 복사해 deploy/market-data.env 로 채운다(gitignored).
+    env_file:
+      - deploy/market-data.env
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # prod 롤링 로그 파일을 호스트에 보존 (컨테이너 재생성에도 로그 유지). 경로는 log4j2-spring.xml 기본값과 일치.
+      - ./logs:/var/log/autotrading
+
+    extra_hosts:
+      # Docker Desktop 은 자동이지만, Linux 엔진/이식성 위해 명시. 호스트의 발행 포트(5432/6379)에 닿게 함.
+      - "host.docker.internal:host-gateway"

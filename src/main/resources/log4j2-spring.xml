@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Log4j2 설정 (Spring Boot 확장 사용 → 파일명은 log4j2.xml 이 아니라 log4j2-spring.xml).
+  build.gradle 에서 logback 을 제외하고 Log4j2 를 로깅 구현체로 통일했다.
+
+  프로파일 분리:
+   - 공통(모든 프로파일): Console 출력. 운영(Docker)에선 docker logs / 로그 드라이버가 stdout 을 캡처.
+   - prod 전용: 롤링 파일 appender 추가. <SpringProfile> arbiter 로 운영에서만 활성 →
+     개발(local)은 콘솔만 (프로젝트 루트에 logs/ 가 생기지 않음, CLAUDE.md 규율 준수).
+
+  파일 경로: prod 파일 appender 는 /var/log/autotrading 에 기록한다. Docker 운영에서는
+  docker-compose.yml 의 볼륨(./logs:/var/log/autotrading)으로 호스트에 보존한다(컨테이너 재생성에도 유지).
+  (LOGS_DIRECTORY 환경변수가 있으면 그 경로를 우선 사용 — 다른 실행 환경 호환용.)
+-->
+<Configuration status="WARN">
+    <Properties>
+        <!-- 콘솔/파일 공통 패턴(색상 코드 없음 — journald/파일 양쪽에서 깔끔). 예외 스택은 Log4j2 가 자동 부가. -->
+        <!-- %d 의 둘째 중괄호 {Asia/Seoul} = 로그 타임스탬프만 KST(UTC+9)로 렌더. JVM 기본 TZ(UTC)·수집 데이터(epoch ms)는 그대로 — 로그 가독성만 변경. -->
+        <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS}{Asia/Seoul} %5p [%t] %-40.40c{1.} : %m%n</Property>
+        <Property name="LOG_DIR">${env:LOGS_DIRECTORY:-/var/log/autotrading}</Property>
+        <Property name="LOG_FILE">${LOG_DIR}/market-data.log</Property>
+    </Properties>
+
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+        </Console>
+
+        <!-- prod 에서만 롤링 파일 생성. 일별 + 50MB 트리거, gz 압축, 14일 경과분 자동 삭제(디스크 보존 캡). -->
+        <SpringProfile name="prod">
+            <RollingFile name="File"
+                         fileName="${LOG_FILE}"
+                         filePattern="${LOG_DIR}/market-data-%d{yyyy-MM-dd}-%i.log.gz">
+                <PatternLayout pattern="${LOG_PATTERN}"/>
+                <Policies>
+                    <TimeBasedTriggeringPolicy/>
+                    <SizeBasedTriggeringPolicy size="50MB"/>
+                </Policies>
+                <DefaultRolloverStrategy max="100">
+                    <Delete basePath="${LOG_DIR}" maxDepth="1">
+                        <IfFileName glob="market-data-*.log.gz"/>
+                        <IfLastModified age="P14D"/>
+                    </Delete>
+                </DefaultRolloverStrategy>
+            </RollingFile>
+        </SpringProfile>
+    </Appenders>
+
+    <Loggers>
+        <Logger name="com.autotrading" level="INFO"/>
+
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+            <!-- File appender 는 prod 에서만 정의되므로 참조도 prod 로 가둔다(미정의 참조 경고 방지). -->
+            <SpringProfile name="prod">
+                <AppenderRef ref="File"/>
+            </SpringProfile>
+        </Root>
+    </Loggers>
+</Configuration>

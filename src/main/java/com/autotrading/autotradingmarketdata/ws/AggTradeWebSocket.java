@@ -2,6 +2,7 @@ package com.autotrading.autotradingmarketdata.ws;
 
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.AggTradeRow;
 import com.autotrading.autotradingmarketdata.collect.CollectProperties;
+import com.autotrading.autotradingmarketdata.publish.MarketDataPublisher;
 import com.autotrading.autotradingmarketdata.raw.AggTradeBuffer;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.websocket.ClientEndpoint;
@@ -27,14 +28,20 @@ public class AggTradeWebSocket extends BinanceWebSocket {
     private final CollectProperties collect;
     private final AggTradeBuffer rawBuffer;
     private final boolean rawEnabled;
+    private final MarketDataPublisher publisher;
+    private final boolean publishEnabled;
 
     public AggTradeWebSocket(CollectProperties collect, AggTradeBuffer rawBuffer,
                              @Value("${collect.raw.enabled:false}") boolean rawEnabled,
+                             MarketDataPublisher publisher,
+                             @Value("${publish.aggtrade.enabled:true}") boolean publishEnabled,
                              MeterRegistry registry) {
         super(registry);
         this.collect = collect;
         this.rawBuffer = rawBuffer;
         this.rawEnabled = rawEnabled;
+        this.publisher = publisher;
+        this.publishEnabled = publishEnabled;
     }
 
     @OnOpen
@@ -82,11 +89,16 @@ public class AggTradeWebSocket extends BinanceWebSocket {
         if (symbol.isEmpty() || aggId <= 0 || price <= 0 || qty <= 0 || tradeTime <= 0) {
             return;
         }
+        boolean buyerMaker = d.path("m").asBoolean(false);
         rawBuffer.offer(new AggTradeRow(
                 symbol, aggId, price, qty,
                 d.path("f").asLong(0),
                 d.path("l").asLong(0),
                 tradeTime,
-                d.path("m").asBoolean(false)));
+                buyerMaker));
+        // 분석 서비스 실시간 CVD/매물대 누적용 Stream 발행 (raw DB 적재와 별개 채널).
+        if (publishEnabled) {
+            publisher.publishAggTrade(symbol, aggId, price, qty, buyerMaker, tradeTime);
+        }
     }
 }

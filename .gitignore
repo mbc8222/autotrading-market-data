@@ -41,3 +41,6 @@ application-local.properties
 application-prod.properties
 *.env
 !*.env.example
+
+### Docker 운영 로그 (호스트 볼륨 마운트, ./logs:/var/log/autotrading) ###
+logs/

@@ -1,0 +1,17 @@
+# 빌드 컨텍스트에서 제외 — 이미지 비대화 방지 + 시크릿 유입 차단
+.git
+.gradle
+build/
+out/
+logs/
+.idea/
+
+# ★ 시크릿: 빌드 컨텍스트/이미지에 절대 들어가면 안 됨 (Dockerfile 도 src 만 COPY 하지만 이중 방어)
+application-local.properties
+application-prod.properties
+*.env
+!*.env.example
+
+# 문서/IDE
+*.md
+HELP.md
