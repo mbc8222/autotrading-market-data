@@ -33,7 +33,7 @@ health: `GET /actuator/health` — db·redis 컴포넌트 UP 확인.
 ## 배포 (Docker, 2026-06-13 — WSL+systemd 에서 전환)
 - **`Dockerfile`**(멀티스테이지): 빌드 스테이지에서 컨테이너 내 `./gradlew bootJar` → IntelliJ "Build Artifacts" 함정(thin jar/MANIFEST 중복) 원천 차단·재현성. 런타임=JRE 21, 비루트(appuser).
 - **`docker-compose.yml`**: `restart: unless-stopped`(★죽으면 자동재시작+데몬 기동 시 자동기동=무중단 핵심), `SPRING_PROFILES_ACTIVE=prod`, `env_file: deploy/market-data.env`(접속정보), `8080:8080` 발행, `./logs:/var/log/autotrading` 볼륨(파일 로그 보존).
-- **인프라(PostgreSQL01·redis)는 이 compose 밖 별도 컨테이너** — 건드리지 않음(재시작=수집 갭 회피). 컨테이너→DB/redis 는 `host.docker.internal:5432/6379`(호스트 발행 포트). `extra_hosts: host-gateway` 명시.
+- **인프라(PostgreSQL01·redis)는 이 compose 밖 별도 컨테이너** — 건드리지 않음(재시작=수집 갭 회피). 접속은 **공유 외부망 `autotrading-net`으로 컨테이너명 직결**(`redis:6379`/`postgres:5432`, 2026-06-14 전환). 이전 `host.docker.internal:5432/6379` 우회는 간헐 드롭 원인이라 제거(`extra_hosts: host-gateway`는 폴백). redis/postgres 합류 보장=`%USERPROFILE%\docker\ensure-shared-net.sh`(재생성 후 재실행).
 - 모니터링(prometheus·grafana)도 별도 compose(`%USERPROFILE%\docker`). prometheus 는 `host.docker.internal:8080` 으로 스크랩(⚠️기존 prometheus.yml 타깃 포트 일치 확인 필요).
 - 절차: `cp deploy/market-data.env.example deploy/market-data.env` → 값 채움 → `docker compose up -d --build`.
 
@@ -47,7 +47,7 @@ health: `GET /actuator/health` — db·redis 컴포넌트 UP 확인.
   템플릿: `application-local.properties.example` (커밋됨, 값 비움).
 - **운영(prod, Docker)**: `application-prod.properties` 파일 없음. compose `env_file: deploy/market-data.env`
   의 환경변수(`SPRING_DATASOURCE_*` 등, relaxed binding)로 주입. `SPRING_PROFILES_ACTIVE=prod` 로 기본 local override.
-  접속 host 는 `host.docker.internal`(컨테이너→호스트 발행 포트). 템플릿: `deploy/market-data.env.example`.
+  접속 host 는 **공유망 컨테이너명**(`SPRING_DATA_REDIS_HOST=redis`, `SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/...`, 2026-06-14 전환). 템플릿: `deploy/market-data.env.example`.
 - 바이낸스 시장데이터는 **공개 엔드포인트라 API 키 불필요** (api.key/secret 설정 없음).
 
 ## 패키지 구조 (`com.autotrading.autotradingmarketdata`)
@@ -117,6 +117,7 @@ spring.data.redis.host / port                    # 환경별 주입
 ```
 
 ## 다음 단계 / 미결
+- **2026-06-14: 레디스/DB 접속 공유망 직결 전환 완료** — host.docker.internal 우회(analyzer가 06-14 03:57 UTC 드롭) 제거, 공유 외부망 `autotrading-net`으로 `redis:6379`/`postgres:5432` 컨테이너명 직결. `deploy/market-data.env`(redis host=`redis`·datasource host=`postgres`)·compose `networks:[default,autotrading-net]` 추가→재생성(~2초 갭은 AggTradeReconciler 복구창 1410분이 백필). 검증: WS 4종 연결·kline 수집 재개·RAW-MON drop0/lost0·공유망 직결. redis는 `restart=no`였어 `unless-stopped`로 보강함.
 - **모놀리스 수집과 이중 가동 중** — 같은 데이터를 양쪽 DB(autotrading/marketdata)에 수집(특히 raw agg_trade 디스크 2배). 모놀리스 수집 중단 시점 결정 필요.
 - kline 백필 깊이 7일은 임시값 — ② 분석 서비스의 데이터 소스 결정(6년 재백필 vs 모놀리스 DB 이관)과 묶어서 확정.
 - ~~aggTrade의 Stream 발행은 분석 서비스 소비자 정의 후~~ → **완료(2026-06-13)**: analyzer FlowAnalyzer(CVD)·VolumeProfileAnalyzer 소비자 정의됨 → `MarketDataPublisher.publishAggTrade`로 `market:aggTrade` 발행(DB 적재 경로와 별개). ⚠️**운영 컨테이너 재배포 필요**(`docker compose up -d --build`)해야 발행 활성화.

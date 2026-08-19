@@ -32,6 +32,14 @@ services:
       # prod 롤링 로그 파일을 호스트에 보존 (컨테이너 재생성에도 로그 유지). 경로는 log4j2-spring.xml 기본값과 일치.
       - ./logs:/var/log/autotrading
 
+    networks:
+      - default          # 이 compose 자체 망(유지)
+      - autotrading-net  # redis/postgres 와 컨테이너명 직결용 공유 외부망
+
     extra_hosts:
-      # Docker Desktop 은 자동이지만, Linux 엔진/이식성 위해 명시. 호스트의 발행 포트(5432/6379)에 닿게 함.
+      # 폴백용으로 남겨둠(접속은 공유망 redis:6379/postgres:5432 우선). 제거해도 무방.
       - "host.docker.internal:host-gateway"
+
+networks:
+  autotrading-net:
+    external: true
