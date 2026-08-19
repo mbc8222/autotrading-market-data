@@ -6,6 +6,7 @@ import com.autotrading.autotradingmarketdata.binance.BinanceRestException;
 import com.autotrading.autotradingmarketdata.binance.BinanceRestRetry;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.FundingRow;
 import com.autotrading.autotradingmarketdata.collect.CollectProperties;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,6 +47,9 @@ public class FuturesDataCollector {
     private static final int FUNDING_PAGE = 1000;
     private static final long THROTTLE_MS = 250;
 
+    /** 사이클마다 증가 — 심볼 시작 위치 회전용(밴 손실을 심볼 간에 균등화). */
+    private long rotation = 0;
+
     private final BinanceFuturesRestApi api;
     private final FuturesRepository repository;
     private final CollectProperties collect;
@@ -69,33 +73,62 @@ public class FuturesDataCollector {
             return;
         }
         try {
-            for (String symbol : collect.symbols()) {
+            // 심볼 순서를 매 사이클 회전한다. 고정 순서면 밴이 늘 같은 지점에서 잘려
+            // 선두 심볼(BTC)만 상시 성공하고 뒤쪽 3심볼이 만성 지연된다(2026-08-20 실측).
+            // 회전하면 최소한 손실이 심볼 간에 균등해지고, 어느 심볼도 영구히 굶지 않는다.
+            List<String> symbols = rotated(collect.symbols());
+            for (String symbol : symbols) {
                 catchUp("oi", "futures_open_interest_hist", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.oiHist(symbol, PERIOD, PAGE, s, e), repository::insertOiHist);
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUp("topPos", "futures_top_position_ratio", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.topPositionRatio(symbol, PERIOD, PAGE, s, e),
                         rows -> repository.insertLsRatio("futures_top_position_ratio", rows));
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUp("topAcct", "futures_top_account_ratio", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.topAccountRatio(symbol, PERIOD, PAGE, s, e),
                         rows -> repository.insertLsRatio("futures_top_account_ratio", rows));
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUp("globalLs", "futures_global_ls_ratio", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.globalLsRatio(symbol, PERIOD, PAGE, s, e),
                         rows -> repository.insertLsRatio("futures_global_ls_ratio", rows));
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUp("taker", "futures_taker_ratio", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.takerRatio(symbol, PERIOD, PAGE, s, e), repository::insertTaker);
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUp("basis", "futures_basis", "pair", symbol, r -> r.ts(),
                         (s, e) -> api.basis(symbol, PERIOD, PAGE, s, e), repository::insertBasis);
+                BinanceRestRetry.sleep(THROTTLE_MS);
                 catchUpFunding(symbol);
+                // 심볼 사이 간격 — 아래 series 간 간격과 함께 버스트를 평탄화한다.
+                BinanceRestRetry.sleep(THROTTLE_MS);
             }
+            banGuard.cycleSucceeded();
         } catch (BinanceRestException e) {
             if (e.isBanned()) {
-                banGuard.banned("futures");
+                banGuard.banned("futures", e.retryAfterSec());
                 return;
             }
             log.warn("[FUTURES] 사이클 중단(다음 tick 재개): {}", e.getMessage());
         } catch (Exception e) {
             log.error("[FUTURES] 폴링 실패(다음 tick 계속)", e);
         }
+    }
+
+    /**
+     * 사이클마다 시작 심볼을 한 칸 밀어 순서를 회전한다.
+     * 밴으로 사이클이 중간에 끊겨도 다음 사이클은 다른 심볼부터 시작하므로 손실이 균등해진다.
+     */
+    private List<String> rotated(List<String> symbols) {
+        if (symbols.size() <= 1) {
+            return symbols;
+        }
+        int off = (int) (Math.floorMod(rotation++, symbols.size()));
+        List<String> out = new ArrayList<>(symbols.size());
+        for (int i = 0; i < symbols.size(); i++) {
+            out.add(symbols.get((off + i) % symbols.size()));
+        }
+        return out;
     }
 
     /** /futures/data 시리즈 1개: cursor부터 now까지 bounded window로 따라잡는다. */

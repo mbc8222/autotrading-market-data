@@ -191,9 +191,29 @@ public class BinanceFuturesRestApi {
     private static void raiseError(org.springframework.http.HttpRequest request,
                                    org.springframework.http.client.ClientHttpResponse response) throws java.io.IOException {
         String body = new String(FileCopyUtils.copyToByteArray(response.getBody()), StandardCharsets.UTF_8);
+        // 418/429 는 해제 시각을 Retry-After 로 알려준다 — 고정 대기 대신 이 값을 따라야
+        // 밴이 안 풀린 상태에서 재개해 밴을 연장하는 되먹임을 끊을 수 있다(2026-08-20).
+        long retryAfter = headerLong(response, "Retry-After", 0);
+        long usedWeight = headerLong(response, "X-MBX-USED-WEIGHT-1M", -1);
         throw new BinanceRestException(response.getStatusCode().value(),
                 "Binance API error: status=" + response.getStatusCode().value()
-                        + " uri=" + request.getURI().getPath() + " body=" + body);
+                        + " uri=" + request.getURI().getPath()
+                        + " retryAfter=" + retryAfter + "s usedWeight1m=" + usedWeight
+                        + " body=" + body,
+                retryAfter, usedWeight);
+    }
+
+    private static long headerLong(org.springframework.http.client.ClientHttpResponse response,
+                                   String name, long fallback) {
+        String v = response.getHeaders().getFirst(name);
+        if (v == null || v.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     private static String upper(String symbol) {

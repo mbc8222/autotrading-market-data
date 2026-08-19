@@ -109,7 +109,7 @@ public class AggTradeReconciler {
                 reconcileSymbol(symbol, graceCut, floorTs);
             } catch (BinanceRestException e) {
                 if (e.isBanned()) {
-                    banGuard.banned("agg-reconcile");
+                    banGuard.banned("agg-reconcile", e.retryAfterSec());
                     return;   // 이번 sweep 전체 중단
                 }
                 log.warn("[AGG-RECON] {} REST 보정 보류(다음 sweep 재시도): {}", symbol, e.getMessage());

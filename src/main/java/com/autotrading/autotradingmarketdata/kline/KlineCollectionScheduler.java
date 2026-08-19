@@ -47,7 +47,7 @@ public class KlineCollectionScheduler {
                     }
                 } catch (BinanceRestException e) {
                     if (e.isBanned()) {
-                        banGuard.banned("kline");
+                        banGuard.banned("kline", e.retryAfterSec());
                         return;
                     }
                     if (e.isRateLimited()) {
