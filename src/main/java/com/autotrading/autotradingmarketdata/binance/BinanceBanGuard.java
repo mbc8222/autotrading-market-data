@@ -122,9 +122,22 @@ public class BinanceBanGuard {
             basis = "헤더없음 -> 지수후퇴(연속 " + n + "회)";
         }
         extend(bucket, now + pause);
-        log.error("[BAN-GUARD] 418 ban bucket={} ({}) — 해당 양동이 {}분 중지 [{}] 누적 {}회 | {}",
-                bucket.tag(), source, pause / 60_000, basis, banTotal.get(bucket).get(),
-                detail == null ? "(본문없음)" : abbreviate(detail));
+
+        // ★로그 레벨을 양동이별로 나눈다(2026-08-21). 범용 "[운영] 에러 로그 발생" 알림이
+        //   log4j2_events_total{level="error"} 만 세므로, 예상된 basis 밴까지 ERROR 로 남기면
+        //   밴이 날 때마다(2시간 주기) 알림이 울린다. 죽은 market_state 규칙이 9일간 오탐을
+        //   울려 정작 진짜 418 알림이 묻혔던 전례가 있다 — 같은 실수를 반복하지 않는다.
+        //   basis 밴은 격리돼 있고(다른 양동이 영향 0) 30일 보존 안에서 catchUp 이 메우므로
+        //   조치가 필요 없다 = WARN. 6시간 넘게 끌 때만 at-binance-ban-basis 가 알린다.
+        //   fapi/futures_data 는 실제로 수집이 멈추거나 예상 밖이므로 ERROR 를 유지한다.
+        String msg = "[BAN-GUARD] 418 ban bucket={} ({}) — 해당 양동이 {}분 중지 [{}] 누적 {}회 | {}";
+        Object[] args = {bucket.tag(), source, pause / 60_000, basis, banTotal.get(bucket).get(),
+                detail == null ? "(본문없음)" : abbreviate(detail)};
+        if (bucket == RateBucket.FUTURES_DATA_BASIS) {
+            log.warn(msg, args);
+        } else {
+            log.error(msg, args);
+        }
     }
 
     /**
