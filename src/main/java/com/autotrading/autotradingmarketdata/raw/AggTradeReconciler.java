@@ -3,6 +3,7 @@ package com.autotrading.autotradingmarketdata.raw;
 import com.autotrading.autotradingmarketdata.binance.BinanceBanGuard;
 import com.autotrading.autotradingmarketdata.binance.BinanceFuturesRestApi;
 import com.autotrading.autotradingmarketdata.binance.BinanceRestException;
+import com.autotrading.autotradingmarketdata.binance.RateBucket;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.AggTradeRow;
 import com.autotrading.autotradingmarketdata.collect.CollectProperties;
 import com.autotrading.autotradingmarketdata.raw.AggTradeRepository.AggIdGap;
@@ -22,12 +23,12 @@ import org.springframework.stereotype.Component;
  * WS-only 수집의 누락(재기동·끊김·버스트 drop)을 {@value #SWEEP_MS}ms마다 메운다.
  *
  * <p>agg_id는 심볼별 빠짐없이 순차이므로 DB에서 빠진 id = 진짜 갭. 매 sweep 심볼별로:
- * ① floor(24h 복구창 하한)로 watermark clamp — 복구 불가 갭은 포기.
+ * ① floor(복구창 하한)로 watermark clamp — 복구 불가 갭은 포기.
  * ② watermark 위 ~ grace({@value #GRACE_MS}ms 전) 아래를 빠른 집계로 판정 — 연속이면 watermark만 전진(REST 0회).
  * ③ 빈틈이 있으면 누락 구간만 REST로 fetch → 멱등 적재. 완전히 못 메운 갭에서 멈춰 watermark를 안 넘긴다.
  *
  * <p>전용 데몬 스레드(공유 스케줄러와 분리 — 큰 갭 복구가 캔들·파생 폴링을 굶기지 않음).
- * 429는 backoff 재시도, 418은 {@link BinanceBanGuard} 일괄 중지. grace는 WS 정착(재연결 backoff 최대 60s
+ * 429/418 은 {@link BinanceBanGuard} 가 {@link RateBucket#FAPI} 양동이만 중지. grace는 WS 정착(재연결 backoff 최대 60s
  * + flush) 미만 구간을 가짜 갭으로 오인하지 않게 한다. watermark는 인메모리 — 재기동 시 floor부터 재구성.
  */
 @Component
@@ -39,10 +40,20 @@ public class AggTradeReconciler {
     private static final long INITIAL_MS = 90_000;        // 캔들·파생 백필 weight 경합 회피
     private static final long SWEEP_MS = 60_000;
     private static final long GRACE_MS = 120_000;
-    private static final int HISTORY_MIN = 24 * 60 - 30;  // 23h30m: REST 24h 보존에 30분 안전여유
+    /**
+     * 복구창 — aggTrades 는 "past 48 hours" 만 조회 가능(공식 문서, 2026-08-21 확인).
+     * 종전 23h30m 은 "REST 24h 보존"이라는 잘못된 전제였다. 그 때문에 08-19~08-20 의
+     * 22h56m 갭이 아직 조회 가능한데도 창 밖으로 밀려 포기됐다. 48h 에서 1시간 안전여유.
+     */
+    private static final int HISTORY_MIN = 47 * 60;       // 2820분 = 47h
     private static final long HISTORY_MS = HISTORY_MIN * 60_000L;
     private static final int PAGE = 1_000;
-    private static final long THROTTLE_MS = 350;
+    /**
+     * aggTrades 호출 간격. weight 20 요청 · /fapi 예산 2400 min → 상한 120 req/min(=500ms).
+     * kline 이 상시 160/min 을 쓰므로 600ms(=100 req/min → 2000/min)로 두어 합계 약 2160/min(90%).
+     * 종전 350ms 는 3428/min 으로 한도 초과 — 큰 갭 복구에서 429 를 자초하는 값이었다.
+     */
+    private static final long THROTTLE_MS = 600;
     private static final int MAX_RETRY = 5;
     private static final long RL_BACKOFF_MS = 5_000;
 
@@ -98,7 +109,7 @@ public class AggTradeReconciler {
     }
 
     private void sweep() {
-        if (banGuard.isPaused()) {
+        if (banGuard.isPaused(RateBucket.FAPI)) {
             return;
         }
         long now = System.currentTimeMillis();
@@ -109,7 +120,11 @@ public class AggTradeReconciler {
                 reconcileSymbol(symbol, graceCut, floorTs);
             } catch (BinanceRestException e) {
                 if (e.isBanned()) {
-                    banGuard.banned("agg-reconcile", e.retryAfterSec());
+                    banGuard.banned(e.bucket(), "agg-reconcile", e.retryAfterSec(), e.bannedUntilMs(), e.getMessage());
+                    return;   // 이번 sweep 전체 중단
+                }
+                if (e.isRateLimited()) {
+                    banGuard.rateLimited(e.bucket(), "agg-reconcile", e.retryAfterSec());
                     return;   // 이번 sweep 전체 중단
                 }
                 log.warn("[AGG-RECON] {} REST 보정 보류(다음 sweep 재시도): {}", symbol, e.getMessage());
@@ -122,10 +137,10 @@ public class AggTradeReconciler {
     private void reconcileSymbol(String symbol, long graceCut, long floorTs) {
         Long floorAggId = repository.minAggIdSince(symbol, floorTs);
         if (floorAggId == null) {
-            return;   // 24h 복구창 내 데이터 없음
+            return;   // 복구창 내 데이터 없음
         }
         long floor = floorAggId - 1;
-        // 24h 밖으로 처진 watermark는 floor로 끌어올림 — 복구 불가 갭 재스캔 stuck 방지.
+        // 복구창 밖으로 처진 watermark는 floor로 끌어올림 — 복구 불가 갭 재스캔 stuck 방지.
         long w = Math.max(watermark.getOrDefault(symbol, floor), floor);
 
         AggIdScan scan = repository.scanAbove(symbol, w, floorTs, graceCut);
@@ -164,6 +179,11 @@ public class AggTradeReconciler {
         int total = 0;
         long cursor = fromId;
         while (cursor <= toId) {
+            // ★루프 안에서도 확인한다(2026-08-21). 진입부에만 두면 큰 갭 복구가 밴 중에 수천 번을
+            //   두드려 밴을 크게 연장시킨다. 미완으로 반환하면 watermark 를 안 넘겨 다음 sweep 이 재개한다.
+            if (banGuard.isPaused(RateBucket.FAPI)) {
+                break;
+            }
             int limit = (int) Math.min(PAGE, toId - cursor + 1);
             List<AggTradeRow> rows = fetchWithRetry(symbol, cursor, limit);
             if (rows.isEmpty()) {

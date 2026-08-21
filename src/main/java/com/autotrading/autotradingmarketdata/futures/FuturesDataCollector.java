@@ -3,6 +3,7 @@ package com.autotrading.autotradingmarketdata.futures;
 import com.autotrading.autotradingmarketdata.binance.BinanceBanGuard;
 import com.autotrading.autotradingmarketdata.binance.BinanceFuturesRestApi;
 import com.autotrading.autotradingmarketdata.binance.BinanceRestException;
+import com.autotrading.autotradingmarketdata.binance.RateBucket;
 import com.autotrading.autotradingmarketdata.binance.BinanceRestRetry;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.FundingRow;
 import com.autotrading.autotradingmarketdata.collect.CollectProperties;
@@ -45,10 +46,20 @@ public class FuturesDataCollector {
     private static final int BACKFILL_DAYS = 30;                          // /futures/data 보존 한계
     private static final long FUNDING_START = 1_704_067_200_000L;         // 2024-01-01
     private static final int FUNDING_PAGE = 1000;
-    private static final long THROTTLE_MS = 250;
+    /**
+     * /futures/data 계열 호출 간격. 250ms(≈3 req/s)에서 1s 로 늦춘다 — 실측상 이 계열은
+     * 가중치 헤더도 Retry-After 도 주지 않는 별도 한도이고, 초당 3건 구간에서 418 이 걸렸다.
+     * 한 사이클 28요청 × 1s ≈ 28초로 수집 주기(5분) 안에 충분히 들어가므로 신선도 손실은 없다.
+     */
+    private static final long THROTTLE_MS = 1_000;
+    /** basis 폴링 주기 — 5분에서 30분으로. WINDOW_MS(37.5h) 덕에 5분 해상도 행은 그대로 다 들어온다. */
+    private static final long BASIS_INTERVAL_MS = 30 * 60_000L;
 
     /** 사이클마다 증가 — 심볼 시작 위치 회전용(밴 손실을 심볼 간에 균등화). */
     private long rotation = 0;
+
+    /** basis 마지막 폴링 시각 — BASIS_INTERVAL_MS 간격 유지용. 0 = 기동 후 첫 사이클에 즉시 1회. */
+    private volatile long lastBasisAt = 0;
 
     private final BinanceFuturesRestApi api;
     private final FuturesRepository repository;
@@ -66,17 +77,30 @@ public class FuturesDataCollector {
         this.banGuard = banGuard;
     }
 
-    /** 첫 실행이 30일 백필을 겸한다(행 기반 resume이라 백필=폴링 동일 로직). */
+    /**
+     * 첫 실행이 30일 백필을 겸한다(행 기반 resume이라 백필=폴링 동일 로직).
+     *
+     * <p>★2026-08-21: 한 사이클을 <b>세 패스</b>로 쪼갰다. 종전에는 심볼 루프 안에서 7종을
+     * 연달아 호출했고, {@code basis} 에서 난 예외가 {@code poll()} 까지 올라가 <b>남은 심볼이
+     * 통째로 스킵</b>됐다(관측된 418 502건이 전부 basis 였으므로 사실상 매번 그랬다).
+     * 패스를 나누면 basis 가 죽어도 나머지가 살고, 각 패스가 자기 양동이만 본다.
+     */
     @Scheduled(fixedDelayString = "${collect.futures.fixed-delay:5m}", initialDelayString = "10s")
     public void poll() {
-        if (banGuard.isPaused()) {
+        // 심볼 순서를 매 사이클 회전한다. 고정 순서면 밴이 늘 같은 지점에서 잘려
+        // 선두 심볼(BTC)만 상시 성공하고 뒤쪽 3심볼이 만성 지연된다(2026-08-20 실측).
+        List<String> symbols = rotated(collect.symbols());
+        pollStats(symbols);
+        pollFunding(symbols);
+        pollBasis(symbols);
+    }
+
+    /** 패스 1 — {@code /futures/data} 통계 5종. 밴 유발 이력 0건이라 5분 주기를 유지한다. */
+    private void pollStats(List<String> symbols) {
+        if (banGuard.isPaused(RateBucket.FUTURES_DATA)) {
             return;
         }
         try {
-            // 심볼 순서를 매 사이클 회전한다. 고정 순서면 밴이 늘 같은 지점에서 잘려
-            // 선두 심볼(BTC)만 상시 성공하고 뒤쪽 3심볼이 만성 지연된다(2026-08-20 실측).
-            // 회전하면 최소한 손실이 심볼 간에 균등해지고, 어느 심볼도 영구히 굶지 않는다.
-            List<String> symbols = rotated(collect.symbols());
             for (String symbol : symbols) {
                 catchUp("oi", "futures_open_interest_hist", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.oiHist(symbol, PERIOD, PAGE, s, e), repository::insertOiHist);
@@ -96,23 +120,90 @@ public class FuturesDataCollector {
                 catchUp("taker", "futures_taker_ratio", "symbol", symbol, r -> r.ts(),
                         (s, e) -> api.takerRatio(symbol, PERIOD, PAGE, s, e), repository::insertTaker);
                 BinanceRestRetry.sleep(THROTTLE_MS);
+            }
+            banGuard.cycleSucceeded(RateBucket.FUTURES_DATA);
+        } catch (BinanceRestException e) {
+            if (!reportLimit(e, "futures-stats")) {
+                log.warn("[FUTURES] 통계 패스 중단(다음 tick 재개): {}", e.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("[FUTURES] 통계 패스 실패(다음 tick 계속)", e);
+        }
+    }
+
+    /**
+     * 패스 2 — funding. 이건 {@code /fapi/v1/fundingRate} 라 <b>FAPI 양동이</b>다.
+     * 종전에는 심볼 루프 안에 섞여 있어서 basis 밴에 같이 끌려갔다.
+     */
+    private void pollFunding(List<String> symbols) {
+        if (banGuard.isPaused(RateBucket.FAPI)) {
+            return;
+        }
+        try {
+            for (String symbol : symbols) {
+                catchUpFunding(symbol);
+                BinanceRestRetry.sleep(THROTTLE_MS);
+            }
+            banGuard.cycleSucceeded(RateBucket.FAPI);
+        } catch (BinanceRestException e) {
+            if (!reportLimit(e, "futures-funding")) {
+                log.warn("[FUTURES] funding 패스 중단(다음 tick 재개): {}", e.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("[FUTURES] funding 패스 실패(다음 tick 계속)", e);
+        }
+    }
+
+    /**
+     * 패스 3 — basis. 관측된 418 <b>502건이 전부</b> 이 엔드포인트에서 났고, 응답이 지목하는 IP 가
+     * 우리 것이 아니라 바이낸스 내부 주소({@code 10.119.x.x}, 9개가 번갈아)라 <b>우리 요청량과
+     * 무관하게</b> 밴이 난다({@link RateBucket} 참조).
+     *
+     * <p>그래서 두 가지를 한다 — ① 별도 양동이로 격리해 나머지 6종을 오염시키지 않는다.
+     * ② 주기를 {@value #BASIS_INTERVAL_MS}ms 로 늦춘다. {@code WINDOW_MS} 가 37.5시간이라
+     * 30분마다 받아도 5분 해상도 행이 <b>빠짐없이</b> 들어오므로 데이터 손실은 0이고,
+     * 포화된 프록시에 걸릴 기회만 1/6 로 준다.
+     */
+    private void pollBasis(List<String> symbols) {
+        long now = System.currentTimeMillis();
+        if (now - lastBasisAt < BASIS_INTERVAL_MS) {
+            return;
+        }
+        if (banGuard.isPaused(RateBucket.FUTURES_DATA_BASIS)) {
+            return;
+        }
+        lastBasisAt = now;
+        for (String symbol : symbols) {
+            try {
                 catchUp("basis", "futures_basis", "pair", symbol, r -> r.ts(),
                         (s, e) -> api.basis(symbol, PERIOD, PAGE, s, e), repository::insertBasis);
                 BinanceRestRetry.sleep(THROTTLE_MS);
-                catchUpFunding(symbol);
-                // 심볼 사이 간격 — 아래 series 간 간격과 함께 버스트를 평탄화한다.
-                BinanceRestRetry.sleep(THROTTLE_MS);
+            } catch (BinanceRestException e) {
+                if (reportLimit(e, "futures-basis")) {
+                    return;   // 밴/쿨다운 — 남은 심볼도 두드리지 않는다
+                }
+                log.warn("[FUTURES] {} basis 보류(다음 주기 재개): {}", symbol, e.getMessage());
+            } catch (Exception e) {
+                log.error("[FUTURES] {} basis 실패(다음 주기 계속)", symbol, e);
             }
-            banGuard.cycleSucceeded();
-        } catch (BinanceRestException e) {
-            if (e.isBanned()) {
-                banGuard.banned("futures", e.retryAfterSec());
-                return;
-            }
-            log.warn("[FUTURES] 사이클 중단(다음 tick 재개): {}", e.getMessage());
-        } catch (Exception e) {
-            log.error("[FUTURES] 폴링 실패(다음 tick 계속)", e);
         }
+        banGuard.cycleSucceeded(RateBucket.FUTURES_DATA_BASIS);
+    }
+
+    /**
+     * 418/429 를 <b>예외가 실어온 양동이</b>로 가드에 전달한다.
+     * 반환 true = 레이트리밋이므로 이번 패스를 중단해야 함.
+     */
+    private boolean reportLimit(BinanceRestException e, String source) {
+        if (e.isBanned()) {
+            banGuard.banned(e.bucket(), source, e.retryAfterSec(), e.bannedUntilMs(), e.getMessage());
+            return true;
+        }
+        if (e.isRateLimited()) {
+            banGuard.rateLimited(e.bucket(), source, e.retryAfterSec());
+            return true;
+        }
+        return false;
     }
 
     /**

@@ -193,14 +193,15 @@ public class BinanceFuturesRestApi {
         String body = new String(FileCopyUtils.copyToByteArray(response.getBody()), StandardCharsets.UTF_8);
         // 418/429 는 해제 시각을 Retry-After 로 알려준다 — 고정 대기 대신 이 값을 따라야
         // 밴이 안 풀린 상태에서 재개해 밴을 연장하는 되먹임을 끊을 수 있다(2026-08-20).
+        String path = request.getURI().getPath();
         long retryAfter = headerLong(response, "Retry-After", 0);
         long usedWeight = headerLong(response, "X-MBX-USED-WEIGHT-1M", -1);
         throw new BinanceRestException(response.getStatusCode().value(),
                 "Binance API error: status=" + response.getStatusCode().value()
-                        + " uri=" + request.getURI().getPath()
+                        + " uri=" + path
                         + " retryAfter=" + retryAfter + "s usedWeight1m=" + usedWeight
                         + " body=" + body,
-                retryAfter, usedWeight);
+                retryAfter, usedWeight, RateBucket.of(path));
     }
 
     private static long headerLong(org.springframework.http.client.ClientHttpResponse response,
