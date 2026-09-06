@@ -60,11 +60,15 @@ kline/     KlineCollectProperties · KlineCollector · KlineRepository · KlineC
 futures/   FuturesDataCollector(파생 7종, bounded window+hwm) · FuturesRepository
 ws/        BinanceWebSocket(베이스: reconnect/circuit/라우팅) · MarkPrice·Depth·AggTrade·ForceOrder
            WebSocketStarter(ApplicationReady 일괄 연결)
+depth/     ★풀북(2026-09-06): SymbolUnits(정수 단위=10^-precision — exchangeInfo tickSize 는 실제 해상도와 다름: SOL)
+           · LocalBook(순수 상태기계, 동기화 규칙) · DepthRows(DiffEvent·Snapshot·Row) · DepthCollector(심볼별 상태,
+           스냅샷은 가상스레드+FAPI 밴가드, 파생물 없음 — 수집기는 원시만)
 raw/       BatchBuffer·AggTradeBuffer → RawPersister(전용 워커) · AggTradeRepository(갭 SQL)
+           DepthBuffer(2M) → DepthPersister · DepthRepository(depth_diff 배치·sync_events·symbol_units)
            PartitionMaintenance(일별 파티션 생성만 — ★DROP 은 cold-export 컨테이너 전담, 2026-09-06) · AggTradeReconciler(60s 갭 보정)
            LiquidationRepository
 publish/   MarketDataPublisher(Redis Stream + KV 발행)
-resources/db/migration/  V1=binance_klines · V2=futures 7종+청산+agg_trade(파티션 부모)
+resources/db/migration/  V1=binance_klines · V2=futures 7종+청산+agg_trade(파티션 부모) · V3=depth_diff(파티션 부모)+depth_symbol_units+depth_sync_events
 docs/adr/  아키텍처 결정 기록
 ```
 
@@ -76,7 +80,7 @@ docs/adr/  아키텍처 결정 기록
 | 파생 6종 | /futures/data (5m) | REST 백필(30d)+5m 폴링, bounded window 450×5m | `futures_*` 6테이블 |
 | 펀딩비 | /fapi/v1/fundingRate | REST 전체 히스토리(2024-01~) | `futures_funding_rate` |
 | 마크/인덱스/예상펀딩 | WS @markPrice@1s (/market) | 실시간 | KV `market:mark-price:{s}` (hash) |
-| 호가 top20 요약 | WS @depth20@500ms (/public) | 실시간 | KV `market:orderbook:{s}` — raw 미적재(기존 결정) |
+| **풀북 원시 차분** | WS @depth@100ms (/public) + REST depth?limit=1000 스냅샷 | 로컬 북 동기화(공식 규칙: u<lastUpdateId 버림 · 첫 이벤트 U≤lastUpdateId≤u · 이후 pu==직전 u, 갭 시 재스냅샷) | `depth_diff` (일별 파티션, 핫 3일 → cold-export Parquet, **인덱스 없음**) + `depth_sync_events`·`depth_symbol_units`. 상위 20단 요약은 로컬 북에서 KV `market:orderbook:{s}` (2026-09-06, 이전 @depth20@500ms 대체) |
 | 강제 청산 | WS @forceOrder (/market) | 실시간, 2s flush+재큐잉 | `binance_liquidations` + Stream `market:liquidation` |
 | 원시 체결 | WS @aggTrade (/market) + REST 갭 보정 | 버퍼→배치 적재, 60s 갭 sweep | `agg_trade` (일별 파티션, **핫 3일** — 3일 지난 파티션은 `autotrading-cold-export` 가 Parquet `C:\autotrading-cold\agg_trade` 로 이관·검증 후 DROP, 상태표 `cold.export_state`) + **Stream `market:aggTrade`**(분석 CVD/매물대 소비자용, 고빈도→2k건마다 트림, `publish.aggtrade.enabled`) |
 

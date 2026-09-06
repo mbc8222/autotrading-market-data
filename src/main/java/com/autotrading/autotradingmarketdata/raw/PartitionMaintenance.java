@@ -3,6 +3,7 @@ package com.autotrading.autotradingmarketdata.raw;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -32,7 +33,8 @@ public class PartitionMaintenance {
     private static final Logger log = LogManager.getLogger(PartitionMaintenance.class);
 
     private static final long DAY_MS = 86_400_000L;
-    private static final String PARENT = "agg_trade";
+    /** 일별 파티션 부모들 — agg_trade(trade_time) · depth_diff(event_time, 2026-09-06). */
+    private static final List<String> PARENTS = List.of("agg_trade", "depth_diff");
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     private final JdbcTemplate jdbc;
@@ -56,23 +58,25 @@ public class PartitionMaintenance {
 
     private void maintain() {
         long today = System.currentTimeMillis() / DAY_MS;
-        for (long day = today - 1; day <= today + 2; day++) {
-            ensure(day);
+        for (String parent : PARENTS) {
+            for (long day = today - 1; day <= today + 2; day++) {
+                ensure(parent, day);
+            }
         }
     }
 
-    private void ensure(long epochDay) {
-        String name = partitionName(epochDay);
+    private void ensure(String parent, long epochDay) {
+        String name = partitionName(parent, epochDay);
         try {
-            jdbc.execute("CREATE TABLE IF NOT EXISTS " + name + " PARTITION OF " + PARENT
+            jdbc.execute("CREATE TABLE IF NOT EXISTS " + name + " PARTITION OF " + parent
                     + " FOR VALUES FROM ('" + isoUtc(epochDay) + "') TO ('" + isoUtc(epochDay + 1) + "')");
         } catch (Exception e) {
             log.warn("[PARTITION] {} 생성 실패: {}", name, e.getMessage());
         }
     }
 
-    private static String partitionName(long epochDay) {
-        return PARENT + "_p" + LocalDate.ofEpochDay(epochDay).format(DAY);
+    private static String partitionName(String parent, long epochDay) {
+        return parent + "_p" + LocalDate.ofEpochDay(epochDay).format(DAY);
     }
 
     private static String isoUtc(long epochDay) {

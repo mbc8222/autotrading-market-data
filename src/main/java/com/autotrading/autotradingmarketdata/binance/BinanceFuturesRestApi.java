@@ -6,10 +6,16 @@ import com.autotrading.autotradingmarketdata.binance.FuturesRows.FundingRow;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.LsRatioRow;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.OiHistRow;
 import com.autotrading.autotradingmarketdata.binance.FuturesRows.TakerRatioRow;
+import com.autotrading.autotradingmarketdata.depth.DepthRows;
+import com.autotrading.autotradingmarketdata.depth.SymbolUnits;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatusCode;
@@ -157,6 +163,75 @@ public class BinanceFuturesRestApi {
                 n.path("l").asLong(0),
                 n.path("T").asLong(0),
                 n.path("m").asBoolean(false)));
+    }
+
+    /**
+     * 호가창 스냅샷 — 로컬 북 초기화/재동기화용. limit 1000 = weight 20(FAPI 양동이).
+     * bids/asks 는 [price, qty] 문자열 그대로(단위 변환은 호출자 — 반올림 금지).
+     */
+    public DepthRows.Snapshot depthSnapshot(String symbol, int limit) {
+        JsonNode n = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/fapi/v1/depth")
+                        .queryParam("symbol", upper(symbol))
+                        .queryParam("limit", limit)
+                        .build())
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, BinanceFuturesRestApi::raiseError)
+                .body(JsonNode.class);
+        if (n == null || !n.has("lastUpdateId")) {
+            throw new IllegalStateException("depth 응답 형식 이상: " + n);
+        }
+        return new DepthRows.Snapshot(n.path("lastUpdateId").asLong(0), n.path("E").asLong(0),
+                pairs(n.get("bids")), pairs(n.get("asks")));
+    }
+
+    /**
+     * exchangeInfo 에서 심볼별 자릿수·필터 — 정수 단위의 근거. 심볼은 소문자 페어로 키를 맞춘다.
+     */
+    public Map<String, SymbolUnits> symbolUnits(List<String> symbols) {
+        JsonNode info = restClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/fapi/v1/exchangeInfo").build())
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, BinanceFuturesRestApi::raiseError)
+                .body(JsonNode.class);
+        Map<String, SymbolUnits> out = new HashMap<>();
+        if (info == null) {
+            return out;
+        }
+        Set<String> want = new HashSet<>();
+        for (String s : symbols) {
+            want.add(upper(s));
+        }
+        for (JsonNode s : info.path("symbols")) {
+            String sym = s.path("symbol").asString("");
+            if (!want.contains(sym)) {
+                continue;
+            }
+            String tick = "";
+            String step = "";
+            for (JsonNode f : s.path("filters")) {
+                String type = f.path("filterType").asString("");
+                if ("PRICE_FILTER".equals(type)) {
+                    tick = f.path("tickSize").asString("");
+                } else if ("LOT_SIZE".equals(type)) {
+                    step = f.path("stepSize").asString("");
+                }
+            }
+            out.put(sym.toLowerCase(Locale.ROOT), new SymbolUnits(sym.toLowerCase(Locale.ROOT),
+                    s.path("pricePrecision").asInt(), s.path("quantityPrecision").asInt(), tick, step));
+        }
+        return out;
+    }
+
+    private static List<String[]> pairs(JsonNode arr) {
+        if (arr == null || !arr.isArray()) {
+            return List.of();
+        }
+        List<String[]> out = new ArrayList<>(arr.size());
+        for (JsonNode l : arr) {
+            out.add(new String[] {l.path(0).asString("0"), l.path(1).asString("0")});
+        }
+        return out;
     }
 
     // ── 공통 ──
