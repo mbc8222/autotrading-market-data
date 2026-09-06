@@ -61,7 +61,7 @@ futures/   FuturesDataCollector(파생 7종, bounded window+hwm) · FuturesRepos
 ws/        BinanceWebSocket(베이스: reconnect/circuit/라우팅) · MarkPrice·Depth·AggTrade·ForceOrder
            WebSocketStarter(ApplicationReady 일괄 연결)
 raw/       BatchBuffer·AggTradeBuffer → RawPersister(전용 워커) · AggTradeRepository(갭 SQL)
-           PartitionMaintenance(일별 파티션·90일 DROP) · AggTradeReconciler(60s 갭 보정)
+           PartitionMaintenance(일별 파티션 생성만 — ★DROP 은 cold-export 컨테이너 전담, 2026-09-06) · AggTradeReconciler(60s 갭 보정)
            LiquidationRepository
 publish/   MarketDataPublisher(Redis Stream + KV 발행)
 resources/db/migration/  V1=binance_klines · V2=futures 7종+청산+agg_trade(파티션 부모)
@@ -78,7 +78,7 @@ docs/adr/  아키텍처 결정 기록
 | 마크/인덱스/예상펀딩 | WS @markPrice@1s (/market) | 실시간 | KV `market:mark-price:{s}` (hash) |
 | 호가 top20 요약 | WS @depth20@500ms (/public) | 실시간 | KV `market:orderbook:{s}` — raw 미적재(기존 결정) |
 | 강제 청산 | WS @forceOrder (/market) | 실시간, 2s flush+재큐잉 | `binance_liquidations` + Stream `market:liquidation` |
-| 원시 체결 | WS @aggTrade (/market) + REST 갭 보정 | 버퍼→배치 적재, 60s 갭 sweep | `agg_trade` (일별 파티션, 90일) + **Stream `market:aggTrade`**(분석 CVD/매물대 소비자용, 고빈도→2k건마다 트림, `publish.aggtrade.enabled`) |
+| 원시 체결 | WS @aggTrade (/market) + REST 갭 보정 | 버퍼→배치 적재, 60s 갭 sweep | `agg_trade` (일별 파티션, **핫 3일** — 3일 지난 파티션은 `autotrading-cold-export` 가 Parquet `C:\autotrading-cold\agg_trade` 로 이관·검증 후 DROP, 상태표 `cold.export_state`) + **Stream `market:aggTrade`**(분석 CVD/매물대 소비자용, 고빈도→2k건마다 트림, `publish.aggtrade.enabled`) |
 
 > 418(IP ban)은 `BinanceBanGuard`로 모든 REST 수집기 10분 일괄 중지 (계속 두드리면 ban 연장).
 > aggTrade는 유효성 필터(agg_id·price·qty·T 양수) — 쓰레기 행의 watermark 오염 방지(모놀리스 사고 사례).
