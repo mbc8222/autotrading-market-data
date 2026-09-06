@@ -99,6 +99,8 @@ public class AggTradeWebSocket extends BinanceWebSocket {
         // 분석 서비스 실시간 CVD/매물대 누적용 Stream 발행 (raw DB 적재와 별개 채널).
         if (publishEnabled) {
             publisher.publishAggTrade(symbol, aggId, price, qty, buyerMaker, tradeTime);
+            // 핫상태 "마지막 가격" 은 체결이 원천(분 단위 kline 종가로 쓰던 것을 교체, 2026-09-06)
+            publisher.publishLastPrice(symbol, price);
         }
     }
 }

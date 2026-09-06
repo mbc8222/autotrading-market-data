@@ -73,8 +73,7 @@ public class KlineCollector {
                 .filter(k -> k.isClosedAt(now))
                 .toList();
         publisher.publishClosedKlines(symbol, interval, closed);
-        if ("1m".equals(interval)) {
-            publisher.publishLastPrice(symbol, page.get(page.size() - 1));
-        }
+        // last-price KV 는 AggTradeWebSocket 이 체결마다 쓴다(2026-09-06). 여기서 분 단위 종가로 덮어쓰면
+        // 방금 들어온 체결가를 묵은 값으로 되돌리므로 호출을 뺐다.
     }
 }

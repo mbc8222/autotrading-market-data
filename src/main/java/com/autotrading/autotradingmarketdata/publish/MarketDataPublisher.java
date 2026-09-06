@@ -98,6 +98,18 @@ public class MarketDataPublisher {
 
     // ── key-value 핫상태 (유실 OK) ──
 
+    /**
+     * 마지막 체결가 — aggTrade 마다 갱신한다(2026-09-06).
+     *
+     * <p>★이전에는 1m kline REST 페이지의 마지막 봉 종가로만 썼는데, 그 수집기는 분 단위로 돌아 이 키가
+     * 최대 1분 묵은 값이었다(coin_view "차트가 실시간이 아니다"의 원인). 키 이름이 약속하는 것은 "마지막 가격"
+     * 이므로 체결이 원천이어야 한다. SET 은 초당 수십 회로 Redis 에 무시할 부담.
+     */
+    public void publishLastPrice(String symbol, double price) {
+        redis.opsForValue().set(LAST_PRICE_KEY_PREFIX + symbol, String.valueOf(price));
+    }
+
+    /** kline 종가 기반(분 단위) — 체결 WS 가 발행 중이면 덮어쓰지 않도록 KlineCollector 에서 호출을 뺐다. 예비용으로 남김. */
     public void publishLastPrice(String symbol, BinanceKline latest) {
         redis.opsForValue().set(LAST_PRICE_KEY_PREFIX + symbol, latest.close().toPlainString());
     }
