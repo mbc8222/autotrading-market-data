@@ -1,6 +1,9 @@
 package com.autotrading.autotradingmarketdata.raw;
 
 import com.autotrading.autotradingmarketdata.depth.DepthRows.Row;
+import io.micrometer.core.instrument.FunctionCounter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.util.List;
@@ -29,9 +32,17 @@ public class DepthPersister {
     private volatile boolean running = true;
     private Thread worker;
 
-    public DepthPersister(DepthBuffer buffer, DepthRepository repository) {
+    public DepthPersister(DepthBuffer buffer, DepthRepository repository, MeterRegistry registry) {
         this.buffer = buffer;
         this.repository = repository;
+        Gauge.builder("depth.buffer.size", buffer, BatchBuffer::size)
+                .description("depth_diff 버퍼 현재 깊이").register(registry);
+        FunctionCounter.builder("depth.buffer.dropped", buffer, BatchBuffer::droppedCount)
+                .description("버퍼 상한 초과로 버린 누적 행 수 — 증가 = 유실 진행 중").register(registry);
+        FunctionCounter.builder("depth.persister.written", this, DepthPersister::writtenCount)
+                .description("depth_diff 에 적재한 누적 행 수").register(registry);
+        FunctionCounter.builder("depth.persister.lost", this, DepthPersister::lostCount)
+                .description("적재 재시도 실패로 버린 누적 행 수 — 증가 = DB 쓰기 장애").register(registry);
     }
 
     @PostConstruct

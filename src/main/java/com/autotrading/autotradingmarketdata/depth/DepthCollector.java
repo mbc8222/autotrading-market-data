@@ -12,6 +12,7 @@ import com.autotrading.autotradingmarketdata.publish.MarketDataPublisher;
 import com.autotrading.autotradingmarketdata.raw.DepthBuffer;
 import com.autotrading.autotradingmarketdata.raw.DepthRepository;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.util.ArrayDeque;
@@ -70,6 +71,7 @@ public class DepthCollector {
         final AtomicBoolean snapshotInFlight = new AtomicBoolean(false);
         final ArrayDeque<DiffEvent> pending = new ArrayDeque<>();
         long lastKvMs = 0;
+        volatile long lastEventMs = 0;
 
         SymbolState(String symbol) {
             this.symbol = symbol;
@@ -86,7 +88,14 @@ public class DepthCollector {
         this.publisher = publisher;
         this.banGuard = banGuard;
         for (String s : collect.symbols()) {
-            states.put(s.toLowerCase(), new SymbolState(s.toLowerCase()));
+            SymbolState st = new SymbolState(s.toLowerCase());
+            states.put(st.symbol, st);
+            // 적재 정지 감시용 — SQL 로 depth_diff 를 훑지 않고(인덱스 없음) 수집기가 직접 낸다.
+            Gauge.builder("depth.last.event.age.seconds", st,
+                            x -> x.lastEventMs == 0 ? -1 : (System.currentTimeMillis() - x.lastEventMs) / 1000.0)
+                    .tag("symbol", st.symbol)
+                    .description("마지막 diff 적용 후 경과 초 (-1=아직 없음)")
+                    .register(registry);
         }
         gaps = Counter.builder("depth.gaps").description("diff 순번 갭(재동기화) 횟수").register(registry);
         snapshots = Counter.builder("depth.snapshots").description("REST 스냅샷 적용 횟수").register(registry);
@@ -154,6 +163,7 @@ public class DepthCollector {
                 for (Row row : rows) {
                     buffer.offer(withRecv(row, recvMs));
                 }
+                st.lastEventMs = recvMs;
                 publishKv(st, ev.eventMs());
             }
             case GAP -> {
