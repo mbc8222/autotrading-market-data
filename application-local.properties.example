@@ -7,9 +7,14 @@
 # - 이 .example 만 git 추적 (실제 application-local.properties 는 .gitignore 로 제외).
 # - 프로젝트 루트에 두면 IntelliJ 실행(작업 디렉토리=루트) 시 자동 로드된다.
 #   src/main/resources 에 두지 말 것 — JAR 에 패키징되어 시크릿이 유출된다.
-# - 운영(WSL)은 이 파일을 쓰지 않는다. systemd EnvironmentFile 의 환경변수로 주입 (deploy/ 참고).
+# - 운영(prod, Docker)은 이 파일을 쓰지 않는다. compose 의 env_file(deploy/market-data.env)이
+#   환경변수로 주입한다 (deploy/market-data.env.example 참고).
+#
+# ★ 여기서 host 가 localhost 인 이유: local 프로파일은 앱이 컨테이너가 아니라 호스트에서 직접 뜨고,
+#   PostgreSQL·Redis 컨테이너는 호스트로 포트를 발행하고 있기 때문이다.
+#   컨테이너로 띄우는 prod 는 공유망 컨테이너명(postgres/redis)으로 접속한다 — 값이 다르다.
 
-# PostgreSQL (Docker 컨테이너 PostgreSQL01, DB/계정/스키마 = marketdata)
+# PostgreSQL (호스트로 5432 를 발행한 PostgreSQL 컨테이너. DB/스키마 = marketdata)
 spring.datasource.url=jdbc:postgresql://localhost:5432/marketdata?currentSchema=marketdata
 spring.datasource.username=your_username
 spring.datasource.password=your_password
@@ -18,6 +23,6 @@ spring.datasource.password=your_password
 spring.flyway.default-schema=marketdata
 spring.flyway.schemas=marketdata
 
-# Redis (Docker 컨테이너 redis)
+# Redis (호스트로 6379 를 발행한 Redis 컨테이너)
 spring.data.redis.host=localhost
 spring.data.redis.port=6379
